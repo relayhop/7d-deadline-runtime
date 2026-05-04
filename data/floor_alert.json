@@ -1,0 +1,7 @@
+{
+  "ts": "2026-05-04T16:42:22Z",
+  "active_count": 0,
+  "floor": 5,
+  "needs_refill": true,
+  "alert_text": "Active strategies below floor; next Claude session should take from candidate pool priority 1→6"
+}
