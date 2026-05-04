@@ -1,0 +1,73 @@
+name: disconnect_detector
+
+on:
+  schedule:
+    - cron: '45 * * * *'   # hourly at :45
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Already paused?
+        id: pause
+        run: |
+          if [[ -f pause_state.json ]]; then
+            PAUSED=$(jq -r '.paused // false' pause_state.json)
+            if [[ "$PAUSED" == "true" ]]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Detect Mac > 24h no push
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          # Look at heartbeat file written by Mac local cron (logs/.heartbeat_mac.ts)
+          # If > 24h old → auto pause
+          HB="data/.heartbeat_mac.ts"
+          if [[ ! -f "$HB" ]]; then
+            echo "no heartbeat yet — bootstrap state, skip"
+            exit 0
+          fi
+          HB_TS=$(cat "$HB")
+          NOW=$(date +%s)
+          AGE_H=$(( (NOW - HB_TS) / 3600 ))
+          echo "Mac heartbeat age: ${AGE_H}h"
+
+          if (( AGE_H >= 24 )); then
+            echo "→ auto pause (Mac > 24h no push)"
+            cat > pause_state.json <<EOF
+          {
+            "paused": true,
+            "paused_at": "$(date -u +%FT%TZ)",
+            "auto_pause": true,
+            "reason": "Mac > ${AGE_H}h 無 push (auto detected)"
+          }
+          EOF
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add pause_state.json
+            git commit -m "[7d] auto-pause: Mac ${AGE_H}h offline"
+            git push
+
+            # Open GH issue + (optional) Discord/Telegram push if secrets set
+            gh issue create \
+              --title "[7d] AUTO-PAUSE: Mac ${AGE_H}h offline" \
+              --body "Mac 無 git push 已 ${AGE_H}h;7d 子專案已自動 pause。User 重連後 ./scripts/resume.sh" \
+              --label "auto-pause,critical" 2>&1 || true
+
+            # Discord push (if secret set)
+            if [[ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]]; then
+              curl -sS -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+                -H 'Content-Type: application/json' \
+                -d "{\"content\":\"⚠️ 7d 子專案 AUTO-PAUSE: Mac ${AGE_H}h offline\"}" || true
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

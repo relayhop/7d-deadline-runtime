@@ -1,0 +1,91 @@
+name: daily_summary
+
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 09:00 UTC+8 = 01:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build daily summary
+        run: |
+          DAY=$(TZ='Asia/Taipei' date +%Y-%m-%d)
+          mkdir -p data/daily
+          OUT="data/daily/${DAY}.md"
+
+          PUB="data/published_strategies.tsv"
+          PROG="data/strategy_progress.tsv"
+          INC="data/income_events.log"
+          PQ="data/pending_queue.tsv"
+
+          ACTIVE_N=0
+          [[ -f "$PUB" ]] && ACTIVE_N=$(awk -F'\t' '/^#/{next} $5=="active"' "$PUB" | wc -l | tr -d ' ')
+
+          INCOME_24H=0
+          [[ -f "$INC" ]] && {
+            CUTOFF=$(date -u -d '24 hours ago' +%s 2>/dev/null || date -u -v-24H +%s)
+            INCOME_24H=$(awk -F'\t' -v c="$CUTOFF" '/^#/{next} $1>=c' "$INC" | wc -l | tr -d ' ')
+          }
+
+          PQ_TOTAL=0
+          PQ_N2M=0
+          [[ -f "$PQ" ]] && {
+            PQ_TOTAL=$(grep -cv '^#' "$PQ")
+            PQ_N2M=$(awk -F'\t' '/^#/{next} $5=="N2m"' "$PQ" | wc -l | tr -d ' ')
+          }
+
+          PAUSED="false"
+          [[ -f pause_state.json ]] && PAUSED=$(jq -r '.paused // false' pause_state.json)
+
+          cat > "$OUT" <<EOF
+          # 7d 子專案 Daily Summary — $DAY
+
+          - paused: $PAUSED
+          - active_strategies: $ACTIVE_N (floor: 5)
+          - income_events_24h: $INCOME_24H
+          - pending_queue: $PQ_TOTAL (N2m: $PQ_N2M)
+
+          ## Active strategies
+
+          \`\`\`
+          $(awk -F'\t' '/^#/{next} $5=="active"' "$PUB" 2>/dev/null | head -10)
+          \`\`\`
+
+          ## Last 24h progress signals
+
+          \`\`\`
+          $(awk -F'\t' '/^#/{next}' "$PROG" 2>/dev/null | tail -10)
+          \`\`\`
+
+          ## Pending (N2m stale)
+
+          \`\`\`
+          $(awk -F'\t' '/^#/{next} $5=="N2m"' "$PQ" 2>/dev/null | tail -5)
+          \`\`\`
+          EOF
+
+          # Open GH issue with summary (if substantive content)
+          if (( INCOME_24H > 0 )) || (( PQ_N2M > 0 )) || (( ACTIVE_N < 5 )); then
+            gh issue create \
+              --title "[7d] Daily Summary — $DAY (income=$INCOME_24H, active=$ACTIVE_N/5, N2m=$PQ_N2M)" \
+              --body "$(cat $OUT)" \
+              --label "daily-summary" 2>&1 || true
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/daily/ || true
+          git diff --staged --quiet || git commit -m "[7d] daily_summary $(date -u +%F)"
+          git push || true

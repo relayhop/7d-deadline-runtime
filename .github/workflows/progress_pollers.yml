@@ -1,0 +1,49 @@
+name: progress_pollers
+
+# Generic poller that loops over 10 profit_models;each as STUB until per-platform
+# integration is filled in. Better than 10 separate workflow files for now.
+
+on:
+  schedule:
+    - cron: '5 */1 * * *'    # hourly fastest (1h)
+    - cron: '5 */4 * * *'    # 4h slower group
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pause check
+        id: pause
+        run: |
+          chmod +x scripts/_pause_check.sh
+          if ! bash scripts/_pause_check.sh; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run all pollers (STUB)
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          mkdir -p data/pollers
+          MODELS="tip_zap service_lnpaid quest_bounty arbitrage_onchain data_oracle subscription crowdfund marketplace_listing testnet_quest passive_background"
+          for model in $MODELS; do
+            echo "[poll] $model — STUB (no integration yet)"
+            mkdir -p "data/pollers/$model"
+            # TODO: per-platform API call → write to data/strategy_progress.tsv
+            # For now: just heartbeat
+            date -u +%FT%TZ > "data/pollers/$model/.last_run"
+          done
+
+      - name: Commit
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/pollers/ || true
+          git diff --staged --quiet || git commit -m "[7d] pollers heartbeat $(date -u +%FT%TZ)"
+          git push || true

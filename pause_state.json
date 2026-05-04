@@ -1,0 +1,7 @@
+{
+  "paused": false,
+  "paused_at": null,
+  "auto_pause": false,
+  "reason": null,
+  "$comment": "Set paused=true to skip all workflows. Mother subproject pause.sh writes here."
+}

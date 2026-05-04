@@ -1,0 +1,98 @@
+name: check_stale_strategies_7d
+
+on:
+  schedule:
+    - cron: '15 * * * *'   # hourly at :15
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check_stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pause check
+        id: pause
+        run: |
+          chmod +x scripts/_pause_check.sh
+          if ! bash scripts/_pause_check.sh; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Detect stale strategies (48h dynamic idle)
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          mkdir -p data
+          PROG="data/strategy_progress.tsv"
+          PUB="data/published_strategies.tsv"
+          [[ ! -f "$PUB" ]] && { echo "no published_strategies — skip"; exit 0; }
+          NOW=$(date +%s)
+
+          # For each active strategy, find last progress signal
+          # If > 48h → write N2m to pending_queue + open issue
+          # If > 36h → open issue (push notification)
+          # If > 24h → just log warn
+
+          STALE_24H=()
+          STALE_36H=()
+          STALE_48H=()
+          while IFS=$'\t' read -r ts strat plat ident st amp pmodel pausable; do
+            [[ "$ts" =~ ^# ]] && continue
+            [[ "$st" != "active" ]] && continue
+            # Last progress signal for this strat
+            LAST_SIG=$(awk -F'\t' -v s="$strat" '$2==s {print $1}' "$PROG" 2>/dev/null | tail -1)
+            if [[ -z "$LAST_SIG" ]]; then
+              # No signal ever → use published_at
+              REF_TS="$ts"
+            else
+              REF_TS="$LAST_SIG"
+            fi
+            REF_EP=$(date -d "$REF_TS" +%s 2>/dev/null || echo 0)
+            [[ "$REF_EP" -eq 0 ]] && continue
+            IDLE_S=$(( NOW - REF_EP ))
+            IDLE_H=$(( IDLE_S / 3600 ))
+            if (( IDLE_H >= 48 )); then
+              STALE_48H+=("$strat:$IDLE_H")
+            elif (( IDLE_H >= 36 )); then
+              STALE_36H+=("$strat:$IDLE_H")
+            elif (( IDLE_H >= 24 )); then
+              STALE_24H+=("$strat:$IDLE_H")
+            fi
+          done < "$PUB"
+
+          echo "stale_24h=${STALE_24H[*]}"
+          echo "stale_36h=${STALE_36H[*]}"
+          echo "stale_48h=${STALE_48H[*]}"
+
+          # Write 48h to pending_queue (N2m)
+          if (( ${#STALE_48H[@]} > 0 )); then
+            mkdir -p data
+            for entry in "${STALE_48H[@]}"; do
+              strat="${entry%:*}"
+              ih="${entry##*:}"
+              TS_UTC=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+              printf '%s\t%s\tunknown\tunknown\tN2m\t0\twait_review\tstale_idle_%sh\n' \
+                "$TS_UTC" "$strat" "$ih" >> data/pending_queue.tsv
+            done
+          fi
+
+      - name: Open issue if 36h+ idle
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          # gh CLI auth via GITHUB_TOKEN
+          STALE_FILE=data/.last_stale_check
+          # TODO: only open issue if not opened in last 12h (dedupe)
+          echo "[stub] issue opening — TODO when actual stale strategies exist"
+
+      - name: Commit changes
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "[7d] check_stale at $(date -u +%FT%TZ)"
+          git push || true

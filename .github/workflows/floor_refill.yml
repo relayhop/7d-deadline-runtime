@@ -1,0 +1,58 @@
+name: floor_refill
+
+on:
+  schedule:
+    - cron: '30 * * * *'   # hourly at :30
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  refill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pause check
+        id: pause
+        run: |
+          chmod +x scripts/_pause_check.sh
+          if ! bash scripts/_pause_check.sh; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute floor status
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          PUB="data/published_strategies.tsv"
+          ACTIVE_N=0
+          [[ -f "$PUB" ]] && ACTIVE_N=$(awk -F'\t' '/^#/{next} $5=="active"' "$PUB" | wc -l | tr -d ' ')
+          echo "active_count=$ACTIVE_N (floor: 5)"
+
+          # If active < 5 持續 ≥2h → write event for next session to pick up
+          # 雲端不能直接「啟新策略」(需 Claude 對話);但可寫 floor_alert.json 給下個 session
+          if (( ACTIVE_N < 5 )); then
+            mkdir -p data
+            cat > data/floor_alert.json <<EOF
+          {
+            "ts": "$(date -u +%FT%TZ)",
+            "active_count": $ACTIVE_N,
+            "floor": 5,
+            "needs_refill": true,
+            "alert_text": "Active strategies below floor; next Claude session should take from candidate pool priority 1→6"
+          }
+          EOF
+          else
+            rm -f data/floor_alert.json
+          fi
+
+      - name: Commit
+        if: steps.pause.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "[7d] floor_refill at $(date -u +%FT%TZ)"
+          git push || true
